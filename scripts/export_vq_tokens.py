@@ -200,10 +200,29 @@ def load_vqvae_from_ckpt(ckpt_path: str, ddconfig_fallback: dict, use_ema_copy: 
         legacy_beta_bug=bool(hp.get("legacy_beta_bug", False)),
         output_clamp=bool(hp.get("output_clamp", True)),
         image_key=str(hp.get("image_key", "image")),
-        no_quant=False,        # MUST be False for token export
+        no_quant=False,
         warmup_steps=0,
         total_steps=0,
         min_lr=float(hp.get("min_lr", 1e-6)),
+        usage_entropy_weight=float(hp.get("usage_entropy_weight", 0.0)),
+        dead_code_reset_every=int(hp.get("dead_code_reset_every", 0)),
+        dead_code_reset_threshold=float(hp.get("dead_code_reset_threshold", 0.0)),
+        dead_code_reset_warmup_steps=int(hp.get("dead_code_reset_warmup_steps", 0)),
+        max_dead_code_resets=int(hp.get("max_dead_code_resets", 0)),
+        conditioning_mode=str(hp.get("conditioning_mode", "none")),
+        num_field_types=int(hp.get("num_field_types", 1)),
+        conditioning_dim=int(hp.get("conditioning_dim", 0)),
+        default_field_id=int(hp.get("default_field_id", 0)),
+        use_output_transform=bool(hp.get("use_output_transform", False)),
+        output_transform_default=str(hp.get("output_transform_default", "identity")),
+        output_transform_eps=float(hp.get("output_transform_eps", 1e-6)),
+        lambda_integral=float(hp.get("lambda_integral", 0.0)),
+        integral_loss_mode=str(hp.get("integral_loss_mode", "relative")),
+        integral_min_target_abs=float(hp.get("integral_min_target_abs", 1e-6)),
+        use_exact_integral_correction=bool(hp.get("use_exact_integral_correction", False)),
+        exact_integral_mode_default=str(hp.get("exact_integral_mode_default", "additive")),
+        lambda_range=float(hp.get("lambda_range", 0.0)),
+        range_loss_mode=str(hp.get("range_loss_mode", "hinge")),
     )
 
     missing, unexpected = model.load_state_dict(sd, strict=False)
@@ -486,7 +505,7 @@ def main():
     ap = argparse.ArgumentParser()
 
     # VQ-VAE checkpoint
-    ap.add_argument("--ckpt", default="${LATTE_WORK_ROOT}/vqvae_example/checkpoints/last.ckpt")
+    ap.add_argument("--ckpt", required=True)
     ap.add_argument("--use_ema_copy", action="store_true", default=False)
 
     # Dataset registry selection
@@ -881,5 +900,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 

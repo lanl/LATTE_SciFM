@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 
 from src.data.registry import build_dataset_from_registry
@@ -41,14 +41,27 @@ def ddp_is_enabled() -> bool:
 
 
 def ddp_setup():
+    # if not ddp_is_enabled():
+    #     return 0, 1, 0
+
+    # dist.init_process_group(backend="nccl")
+    # rank = dist.get_rank()
+    # world_size = dist.get_world_size()
+    # local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    # torch.cuda.set_device(local_rank)
+    # return rank, world_size, local_rank
+
     if not ddp_is_enabled():
         return 0, 1, 0
+
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
 
     dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    torch.cuda.set_device(local_rank)
+
     return rank, world_size, local_rank
 
 
@@ -56,6 +69,12 @@ def ddp_cleanup():
     if ddp_is_enabled() and dist.is_initialized():
         dist.destroy_process_group()
 
+def ddp_barrier(local_rank: int):
+    if ddp_is_enabled() and dist.is_initialized():
+        if torch.cuda.is_available():
+            dist.barrier(device_ids=[local_rank])
+        else:
+            dist.barrier()
 
 def is_rank0(rank: int) -> bool:
     return rank == 0
@@ -349,11 +368,36 @@ class VariableMultichEncDecVQTransformer(nn.Module):
 # -----------------------------
 # Load/save helpers
 # -----------------------------
-def compute_loss(logits: torch.Tensor, targets: torch.Tensor, pad_id: int):
+def compute_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    pad_id: int,
+    valid: Optional[torch.Tensor] = None,
+):
+    """
+    Cross-entropy over decoder target tokens.
+
+    If valid is provided, compute loss only on valid target positions.
+    This is stricter than relying only on ignore_index=pad_id and makes
+    padding/masking bugs easier to catch.
+    """
+    logits_f = logits.reshape(-1, logits.size(-1)).float()
+    targets_f = targets.reshape(-1)
+
+    if valid is None:
+        return F.cross_entropy(
+            logits_f,
+            targets_f,
+            ignore_index=int(pad_id),
+        )
+
+    valid_f = valid.reshape(-1).bool()
+    if valid_f.sum().item() == 0:
+        raise RuntimeError("No valid decoder target tokens in batch.")
+
     return F.cross_entropy(
-        logits.reshape(-1, logits.size(-1)).float(),
-        targets.reshape(-1),
-        ignore_index=int(pad_id),
+        logits_f[valid_f],
+        targets_f[valid_f],
     )
 
 
@@ -387,32 +431,82 @@ def load_init_or_resume(
     copied = []
     skipped = []
 
+    exact_tensors = 0
+    overlap_tensors = 0
+    exact_elems = 0
+    overlap_elems = 0
+    skipped_elems = 0
+
+    ckpt_total_elems = sum(v.numel() for v in sd.values() if hasattr(v, "numel"))
+    target_total_elems = sum(v.numel() for v in target_sd.values() if hasattr(v, "numel"))
+
     for k, v in sd.items():
         if k not in target_sd:
-            skipped.append((k, "missing_in_target"))
+            skipped.append((k, "missing_in_target", tuple(v.shape), None))
+            if hasattr(v, "numel"):
+                skipped_elems += int(v.numel())
             continue
 
         tv = target_sd[k]
         if tuple(v.shape) == tuple(tv.shape):
             new_sd[k] = v
-            copied.append((k, "full"))
+            copied.append((k, "full", tuple(v.shape), tuple(tv.shape)))
+            exact_tensors += 1
+            exact_elems += int(v.numel())
             continue
 
         # Allow overlapping copy for embeddings/linear weights if width/rank compatible.
         maybe = copy_overlap_param(tv, v)
         if maybe is not None:
             new_sd[k] = maybe
-            copied.append((k, f"overlap {tuple(v.shape)} -> {tuple(tv.shape)}"))
+            copied.append((k, "overlap", tuple(v.shape), tuple(tv.shape)))
+            overlap_tensors += 1
+
+            overlap_shape = tuple(min(v.shape[i], tv.shape[i]) for i in range(v.ndim))
+            n_overlap = 1
+            for s in overlap_shape:
+                n_overlap *= int(s)
+            overlap_elems += int(n_overlap)
         else:
-            skipped.append((k, f"shape_mismatch {tuple(v.shape)} -> {tuple(tv.shape)}"))
+            skipped.append((k, "shape_mismatch", tuple(v.shape), tuple(tv.shape)))
+            if hasattr(v, "numel"):
+                skipped_elems += int(v.numel())
 
     missing, unexpected = target.load_state_dict(new_sd, strict=False)
 
+    loaded_elems = exact_elems + overlap_elems
+
+    print(">> load_init_or_resume diagnostics:", flush=True)
+    print(f"   ckpt_path              : {ckpt_path}", flush=True)
+    print(f"   ckpt_total_elems       : {ckpt_total_elems:,}", flush=True)
+    print(f"   target_total_elems     : {target_total_elems:,}", flush=True)
+    print(f"   exact_tensors          : {exact_tensors}", flush=True)
+    print(f"   overlap_tensors        : {overlap_tensors}", flush=True)
+    print(f"   skipped_tensors        : {len(skipped)}", flush=True)
+    print(f"   exact_elems            : {exact_elems:,}", flush=True)
+    print(f"   overlap_elems          : {overlap_elems:,}", flush=True)
+    print(f"   loaded_elems           : {loaded_elems:,}", flush=True)
+    print(f"   skipped_elems          : {skipped_elems:,}", flush=True)
+    print(f"   loaded/target          : {loaded_elems / max(1, target_total_elems):.4%}", flush=True)
+    print(f"   loaded/ckpt            : {loaded_elems / max(1, ckpt_total_elems):.4%}", flush=True)
+
+    if skipped:
+        print("   first skipped:", flush=True)
+        for item in skipped[:20]:
+            print(f"      {item}", flush=True)
+
+    overlap_only = [x for x in copied if x[1] == "overlap"]
+    if overlap_only:
+        print("   first overlap-copied:", flush=True)
+        for item in overlap_only[:20]:
+            print(f"      {item}", flush=True)
+
     if strictish and skipped:
-        raise RuntimeError(f"Skipped {len(skipped)} params while loading {ckpt_path}; first few={skipped[:10]}")
+        raise RuntimeError(
+            f"Skipped {len(skipped)} params while loading {ckpt_path}; first few={skipped[:10]}"
+        )
 
     return ckpt, missing, unexpected, copied, skipped
-
 
 def save_ckpt(path, model, opt, scaler, step, best_val, args, extra):
     tmp = path + ".tmp"
@@ -448,12 +542,28 @@ def main():
     ap.add_argument("--max_pairs", type=int, default=None)
 
     ap.add_argument("--batch_size", type=int, default=2, help="Per-GPU batch size under DDP.")
-    ap.add_argument("--num_workers", type=int, default=0)
+    ap.add_argument("--num_workers", type=int, default=4)
 
     ap.add_argument("--max_steps", type=int, default=100000)
     ap.add_argument("--eval_every", type=int, default=1000)
     ap.add_argument("--save_every", type=int, default=5000)
     ap.add_argument("--eval_batches", type=int, default=100)
+    ap.add_argument(
+        "--eval_mode",
+        type=str,
+        default="balanced_file",
+        choices=["first_batches", "balanced_file", "full"],
+        help=(
+            "Validation mode. first_batches preserves old behavior; "
+            "balanced_file evaluates up to eval_batches batches per token file; "
+            "full evaluates the entire validation set."
+        ),
+    )
+    ap.add_argument(
+        "--print_val_by_file",
+        action="store_true",
+        help="Print per-file validation CE during evaluation.",
+    )
 
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--warmup_steps", type=int, default=3000)
@@ -479,11 +589,24 @@ def main():
     ap.add_argument("--precision", default="bf16", choices=["fp32", "bf16", "fp16"])
     ap.add_argument("--seed", type=int, default=1337)
 
+    ap.add_argument("--train_subset_frac", type=float, default=None)
+    ap.add_argument("--train_subset_n", type=int, default=None)
+    ap.add_argument("--train_subset_mode", type=str, default="first", choices=["first", "random"])
+
+    ap.add_argument("--token_channel_idxs", type=str, default=None)
+    ap.add_argument("--train_first_traj_count", type=int, default=None)
+    ap.add_argument("--train_first_traj_frac", type=float, default=None)
+
+    ap.add_argument("--min_num_datasets", type=int, default=1)
+
     args = ap.parse_args()
 
     if args.resume is not None and args.init_from is not None:
         raise ValueError("Use either --resume or --init_from, not both.")
 
+    if args.train_first_traj_count is not None and args.train_first_traj_frac is not None:
+        raise ValueError("Use only one of --train_first_traj_count or --train_first_traj_frac")
+    
     rank, world_size, local_rank = ddp_setup()
 
     try:
@@ -498,8 +621,24 @@ def main():
         extra_train: Dict[str, Any] = {"seed": args.seed}
         extra_val: Dict[str, Any] = {"seed": args.seed}
 
-        if args.max_pairs is not None:
-            extra_train["max_pairs"] = int(args.max_pairs)
+        if args.token_channel_idxs is not None:
+            extra_train["token_channel_idxs"] = args.token_channel_idxs
+            extra_val["token_channel_idxs"] = args.token_channel_idxs
+
+        if args.train_first_traj_count is not None:
+            extra_train["first_traj_count"] = int(args.train_first_traj_count)
+
+        if args.train_first_traj_frac is not None:
+            extra_train["first_traj_frac"] = float(args.train_first_traj_frac)
+
+        if args.train_subset_frac is not None:
+            extra_train["subset_frac"] = float(args.train_subset_frac)
+
+        if args.train_subset_n is not None:
+            extra_train["subset_n"] = int(args.train_subset_n)
+
+        extra_train["subset_mode"] = args.train_subset_mode
+        extra_train["subset_seed"] = args.seed
 
         ds_tr = build_dataset_from_registry(
             reg,
@@ -545,6 +684,8 @@ def main():
         )
 
         dl_va = None
+        val_indices_by_file = None
+
         if is_rank0(rank):
             dl_va = DataLoader(
                 ds_va,
@@ -557,6 +698,19 @@ def main():
                 persistent_workers=(args.num_workers > 0),
             )
 
+            # Build validation groups by token file so eval does not only measure
+            # the first file in the ordered validation set.
+            val_indices_by_file = {}
+            if hasattr(ds_va, "index"):
+                for i, item in enumerate(ds_va.index):
+                    if isinstance(item, dict):
+                        fi = int(item.get("file_i", item.get("file_idx", item.get("file_index", 0))))
+                    else:
+                        fi = int(item[0])
+                    val_indices_by_file.setdefault(fi, []).append(i)
+            else:
+                val_indices_by_file = {0: list(range(len(ds_va)))}
+
         model = VariableMultichEncDecVQTransformer(
             vocab_size=int(ds_tr.vocab_size),
             pad_id=int(ds_tr.pad_id),
@@ -564,7 +718,11 @@ def main():
             cond_pad_id=int(getattr(ds_tr, "cond_pad_id", 0)),
             max_Hq=max(int(ds_tr.max_Hq), int(ds_va.max_Hq), int(args.min_max_Hq)),
             max_Wq=max(int(ds_tr.max_Wq), int(ds_va.max_Wq), int(args.min_max_Wq)),
-            num_datasets=max(int(ds_tr.num_datasets), int(ds_va.num_datasets)),
+            num_datasets=max(
+                int(ds_tr.num_datasets),
+                int(ds_va.num_datasets),
+                int(args.min_num_datasets),
+            ),
             max_channels=max(int(ds_tr.max_channels), int(ds_va.max_channels), int(args.min_max_channels)),
             n_layer_enc=args.n_layer_enc,
             n_layer_dec=args.n_layer_dec,
@@ -665,24 +823,85 @@ def main():
             if not is_rank0(rank):
                 return None
 
-            model.eval()
-            total = 0.0
-            n = 0
+            eval_model = unwrap_model(model)
+            eval_model.eval()
 
-            for batch in dl_va:
-                batch = move_batch(batch)
+            def eval_loader(loader, max_batches=None):
+                total_loss_weighted = 0.0
+                total_tokens = 0
+                total_batches = 0
 
-                with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
-                    logits = model(batch)
-                    loss = compute_loss(logits, batch["dec_tgt"], pad_id=pad_id)
+                for batch in loader:
+                    batch = move_batch(batch)
 
-                total += float(loss.item())
-                n += 1
-                if n >= args.eval_batches:
-                    break
+                    with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
+                        logits = eval_model(batch)
+                        loss = compute_loss(
+                            logits,
+                            batch["dec_tgt"],
+                            pad_id=pad_id,
+                            valid=batch["dec_valid"],
+                        )
 
-            model.train()
-            return total / max(1, n)
+                    n_valid = int(batch["dec_valid"].sum().item())
+                    total_loss_weighted += float(loss.item()) * n_valid
+                    total_tokens += n_valid
+                    total_batches += 1
+
+                    if max_batches is not None and total_batches >= max_batches:
+                        break
+
+                ce = total_loss_weighted / max(1, total_tokens)
+                return ce, total_tokens, total_batches
+
+            if args.eval_mode == "first_batches":
+                val_ce, _, _ = eval_loader(dl_va, max_batches=args.eval_batches)
+                eval_model.train()
+                return float(val_ce)
+
+            if args.eval_mode == "full":
+                val_ce, _, _ = eval_loader(dl_va, max_batches=None)
+                eval_model.train()
+                return float(val_ce)
+
+            # Balanced per-file validation.
+            per_file = []
+            for fi, idxs in sorted(val_indices_by_file.items()):
+                subset = Subset(ds_va, idxs)
+                loader = DataLoader(
+                    subset,
+                    batch_size=args.batch_size,
+                    shuffle=False,
+                    num_workers=0,
+                    pin_memory=False,
+                    drop_last=False,
+                    collate_fn=collate_fn,
+                    persistent_workers=False,
+                )
+
+                ce, ntok, nb = eval_loader(loader, max_batches=args.eval_batches)
+
+                token_file = "unknown"
+                if hasattr(ds_va, "file_meta"):
+                    try:
+                        token_file = str(ds_va.file_meta[fi])
+                    except Exception:
+                        pass
+
+                per_file.append((fi, ce, ntok, nb, token_file))
+
+            balanced = sum(x[1] for x in per_file) / max(1, len(per_file))
+            weighted = sum(x[1] * x[2] for x in per_file) / max(1, sum(x[2] for x in per_file))
+
+            if args.print_val_by_file:
+                print(">> val_by_file:", flush=True)
+                print("   file_i ce n_tokens n_batches token_file", flush=True)
+                for fi, ce, ntok, nb, token_file in sorted(per_file, key=lambda x: x[1], reverse=True):
+                    print(f"   {fi} {ce:.6f} {ntok} {nb} {token_file}", flush=True)
+                print(f">> val_balanced_file_mean={balanced:.6f} val_token_weighted={weighted:.6f}", flush=True)
+
+            eval_model.train()
+            return float(balanced)
 
         def make_extra():
             m = unwrap_model(model)
@@ -707,7 +926,8 @@ def main():
 
         model.train()
         t0 = time.time()
-        epoch = 0
+        # epoch = 0
+        epoch = step // max(1, len(dl_tr))
 
         while step < args.max_steps:
             if tr_sampler is not None:
@@ -715,6 +935,36 @@ def main():
 
             for batch in dl_tr:
                 batch = move_batch(batch)
+
+                if step == 0 and is_rank0(rank):
+                    print(">> MASK DEBUG", flush=True)
+                    for name in ["enc_tokens", "enc_valid", "dec_in", "dec_tgt", "dec_valid"]:
+                        x = batch[name]
+                        print(f"   {name}: shape={tuple(x.shape)}", flush=True)
+
+                    print(
+                        "   enc_valid real per sample:",
+                        batch["enc_valid"].sum(dim=1).detach().cpu().tolist()[:8],
+                        flush=True,
+                    )
+                    print(
+                        "   dec_valid real per sample:",
+                        batch["dec_valid"].sum(dim=1).detach().cpu().tolist()[:8],
+                        flush=True,
+                    )
+                    print(
+                        "   dec_tgt pad count:",
+                        int((batch["dec_tgt"] == pad_id).sum().item()),
+                        flush=True,
+                    )
+                    print(
+                        "   dec_valid false count:",
+                        int((~batch["dec_valid"]).sum().item()),
+                        flush=True,
+                    )
+
+                    bad = ((batch["dec_tgt"] == pad_id) != (~batch["dec_valid"])).sum().item()
+                    print("   pad/valid mismatch count:", int(bad), flush=True)
 
                 lr = lr_at_step(
                     args.lr,
@@ -730,7 +980,7 @@ def main():
 
                 with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                     logits = model(batch)
-                    loss = compute_loss(logits, batch["dec_tgt"], pad_id=pad_id)
+                    loss = compute_loss(logits, batch["dec_tgt"], pad_id=pad_id, valid=batch["dec_valid"])
 
                 scaler.scale(loss).backward()
                 scaler.unscale_(opt)
@@ -741,21 +991,25 @@ def main():
                 scaler.step(opt)
                 scaler.update()
 
+                step += 1
+
                 if (step % args.eval_every) == 0:
-                    if ddp_is_enabled():
-                        dist.barrier()
+                    # if ddp_is_enabled():
+                    #     dist.barrier()
+                    ddp_barrier(local_rank)
 
                     val_loss = evaluate()
 
-                    if ddp_is_enabled():
-                        dist.barrier()
-
+                    # if ddp_is_enabled():
+                    #     dist.barrier()
+                    ddp_barrier(local_rank)
+                    
                     if is_rank0(rank):
                         dt = (time.time() - t0) / 60.0
                         print(
                             f"[{step:>7}] lr={lr:.3e} "
                             f"train_loss={float(loss.item()):.4f} "
-                            f"val_loss={float(val_loss):.4f} ({dt:.1f} min)",
+                            f"val_loss={float(val_loss):.4f} eval_mode={args.eval_mode} ({dt:.1f} min)",
                             flush=True,
                         )
 
@@ -773,9 +1027,15 @@ def main():
                             )
                             print(">> saved gpt_best.pt", flush=True)
 
+
+                    # Important: wait for rank-0 printing/checkpointing before other ranks continue.
+                    ddp_barrier(local_rank)
+
+
                 if (step % args.save_every) == 0 and step > 0:
-                    if ddp_is_enabled():
-                        dist.barrier()
+                    # if ddp_is_enabled():
+                    #     dist.barrier()
+                    ddp_barrier(local_rank)
 
                     if is_rank0(rank):
                         save_ckpt(
@@ -790,18 +1050,20 @@ def main():
                         )
                         print(f">> saved gpt_step{step}.pt", flush=True)
 
-                    if ddp_is_enabled():
-                        dist.barrier()
+                    # if ddp_is_enabled():
+                    #     dist.barrier()
+                    ddp_barrier(local_rank)
 
-                step += 1
+                # step += 1
 
                 if step >= args.max_steps:
                     break
 
             epoch += 1
 
-        if ddp_is_enabled():
-            dist.barrier()
+        # if ddp_is_enabled():
+        #     dist.barrier()
+        ddp_barrier(local_rank)
 
         if is_rank0(rank):
             save_ckpt(

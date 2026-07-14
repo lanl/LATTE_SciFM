@@ -161,6 +161,3 @@ nonexclusive, paid-up, irrevocable worldwide license in this material to reprodu
 derivative works, distribute copies to the public, perform publicly and display publicly, and to permit
 
 others to do so.
-
-
-

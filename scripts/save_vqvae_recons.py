@@ -35,6 +35,36 @@ def infer_real_num_channels_from_cfg(cfg: Dict[str, Any]) -> int:
     return 1
 
 
+def scalar_channel_metadata_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    meta = dict(cfg.get("scalar_channel_metadata", {}))
+    out: Dict[str, Any] = {}
+    for key in (
+        "channel_field_names",
+        "channel_field_ids",
+        "channel_constraint_classes",
+        "channel_vmin",
+        "channel_vmax",
+        "channel_vrange",
+        "channel_apply_integral_loss",
+        "default_field_name",
+        "default_constraint_class",
+    ):
+        if key in meta:
+            out[key] = meta[key]
+
+    kwargs = cfg.get("kwargs", {})
+    if "minmax_json" in kwargs and not any(k in out for k in ("channel_vmin", "channel_vmax", "channel_vrange")):
+        try:
+            from src.data.transforms import load_minmax_json
+            vmin, vmax, vrange = load_minmax_json(kwargs["minmax_json"])
+            out["channel_vmin"] = [float(x) for x in vmin]
+            out["channel_vmax"] = [float(x) for x in vmax]
+            out["channel_vrange"] = [float(x) for x in vrange]
+        except Exception:
+            pass
+    return out
+
+
 def parse_names(s: str) -> List[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
 
@@ -150,6 +180,7 @@ def main():
             base_dataset=base,
             dataset_name=name,
             num_channels=num_channels,
+            **scalar_channel_metadata_from_cfg(cfg),
             samples_per_dataset=args.samples_per_dataset,
             crop_size=args.scalar_crop_size,
             seed=args.scalar_seed + 99991 + 1009 * dataset_i,

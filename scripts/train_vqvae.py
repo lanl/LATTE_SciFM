@@ -10,7 +10,7 @@ Generic VQ-VAE trainer.
 
 Expected registry schema (per dataset):
 {
-  "class": "src.data.datasets.hdf5_multi_key_field:HDF5MultiKeyFieldDataset",
+  "class": "src.data.datasets.cloverleaf_vtk:CloverleafVTKDataset",
   "kwargs": {... dataset-wide kwargs ...},
   "splits": {
     "train": {"traj_start":0, "traj_count":..., ...},
@@ -64,6 +64,39 @@ def infer_real_num_channels_from_cfg(cfg: Dict[str, Any]) -> int:
         return int(kwargs["model_channels"])
 
     return 1
+
+def scalar_channel_metadata_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    meta = dict(cfg.get("scalar_channel_metadata", {}))
+    out: Dict[str, Any] = {}
+    for key in (
+        "channel_field_names",
+        "channel_field_ids",
+        "channel_constraint_classes",
+        "channel_vmin",
+        "channel_vmax",
+        "channel_vrange",
+        "channel_apply_integral_loss",
+        "channel_use_exact_integral_correction",
+        "channel_exact_integral_mode",
+        "channel_apply_range_loss",
+        "default_field_name",
+        "default_constraint_class",
+    ):
+        if key in meta:
+            out[key] = meta[key]
+
+    kwargs = cfg.get("kwargs", {})
+    if "minmax_json" in kwargs and not any(k in out for k in ("channel_vmin", "channel_vmax", "channel_vrange")):
+        try:
+            from src.data.transforms import load_minmax_json
+            vmin, vmax, vrange = load_minmax_json(kwargs["minmax_json"])
+            out["channel_vmin"] = [float(x) for x in vmin]
+            out["channel_vmax"] = [float(x) for x in vmax]
+            out["channel_vrange"] = [float(x) for x in vrange]
+        except Exception:
+            pass
+    return out
+
 
 def parse_overrides(s: Optional[str]) -> Dict[str, int]:
     """
@@ -453,6 +486,20 @@ def main():
     # VQ params
     ap.add_argument("--n_embed", type=int, default=2048)
     ap.add_argument("--embed_dim", type=int, default=256)
+    ap.add_argument("--conditioning_mode", type=str, default="none", choices=["none", "concat"])
+    ap.add_argument("--num_field_types", type=int, default=1)
+    ap.add_argument("--conditioning_dim", type=int, default=0)
+    ap.add_argument("--default_field_id", type=int, default=0)
+    ap.add_argument("--use_output_transform", action="store_true")
+    ap.add_argument("--output_transform_default", type=str, default="identity", choices=["identity", "softplus", "sigmoid"])
+    ap.add_argument("--output_transform_eps", type=float, default=1e-6)
+    ap.add_argument("--lambda_integral", type=float, default=0.0)
+    ap.add_argument("--integral_loss_mode", type=str, default="relative", choices=["relative", "absolute"])
+    ap.add_argument("--integral_min_target_abs", type=float, default=1e-8)
+    ap.add_argument("--use_exact_integral_correction", action="store_true")
+    ap.add_argument("--exact_integral_mode_default", type=str, default="multiplicative", choices=["additive", "multiplicative"])
+    ap.add_argument("--lambda_range", type=float, default=0.0)
+    ap.add_argument("--range_loss_mode", type=str, default="hinge", choices=["hinge", "mse"])
     ap.add_argument("--learning_rate", type=float, default=2e-4)
     ap.add_argument("--beta", type=float, default=0.1)
     ap.add_argument(
@@ -602,6 +649,7 @@ def main():
                 base_dataset=ds,
                 dataset_name=n,
                 num_channels=num_channels,
+                **scalar_channel_metadata_from_cfg(cfg),
                 samples_per_dataset=args.samples_per_dataset,
                 crop_size=args.scalar_crop_size,
                 seed=args.scalar_seed + 1009 * len(train_sets),
@@ -640,6 +688,7 @@ def main():
                 base_dataset=ds,
                 dataset_name=n,
                 num_channels=num_channels,
+                **scalar_channel_metadata_from_cfg(cfg),
                 samples_per_dataset=args.val_samples_per_dataset,
                 crop_size=args.scalar_crop_size,
                 seed=args.scalar_seed + 99991 + 1009 * len(val_sets),
@@ -831,6 +880,20 @@ def main():
         dead_code_reset_threshold=args.dead_code_reset_threshold,
         dead_code_reset_warmup_steps=args.dead_code_reset_warmup_steps,
         max_dead_code_resets=args.max_dead_code_resets,
+        conditioning_mode=args.conditioning_mode,
+        num_field_types=args.num_field_types,
+        conditioning_dim=args.conditioning_dim,
+        default_field_id=args.default_field_id,
+        use_output_transform=args.use_output_transform,
+        output_transform_default=args.output_transform_default,
+        output_transform_eps=args.output_transform_eps,
+        lambda_integral=args.lambda_integral,
+        integral_loss_mode=args.integral_loss_mode,
+        integral_min_target_abs=args.integral_min_target_abs,
+        use_exact_integral_correction=args.use_exact_integral_correction,
+        exact_integral_mode_default=args.exact_integral_mode_default,
+        lambda_range=args.lambda_range,
+        range_loss_mode=args.range_loss_mode,
     )
 
     if args.resume_weights_only is not None:

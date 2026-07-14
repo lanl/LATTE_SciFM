@@ -441,7 +441,7 @@ def main():
     ap.add_argument("--seed", type=int, default=1337)
 
     ap.add_argument("--init_from", type=str, default=None,
-                    help="Initialize weights from another GPT checkpoint (weights-only partial load). Useful for cross-dataset finetuning.")
+        help="Initialize weights from another GPT checkpoint (weights-only partial load). For cross-dataset finetune (PLI->CYLEX).")
 
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
