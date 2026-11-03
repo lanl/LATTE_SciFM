@@ -1,0 +1,12 @@
+defaults: common.yaml
+dataset: gray_scott
+directory: gray_scott_fixed_ic_1000
+shape: [256, 256]
+frames: 201
+dynamic_fields:
+  - {name: A, path: t0_fields/A, group: A, unit: dimensionless}
+  - {name: B, path: t0_fields/B, group: B, unit: dimensionless}
+static_fields: []
+parameters:
+  - {name: F, path: scalars/F, unit: dimensionless}
+  - {name: k, path: scalars/k, unit: dimensionless}

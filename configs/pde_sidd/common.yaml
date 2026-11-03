@@ -1,0 +1,23 @@
+version: 1
+data_root: ${LATTE_DATA_ROOT}
+work_root: ${LATTE_WORK_ROOT}
+pretrained_tokenizer: ${LATTE_TOKENIZER_CHECKPOINT}
+pretrained_transformer: ${LATTE_TRANSFORMER_CHECKPOINT}
+tokenizer_config: configs/phaedra_pdegym6_df8_reference.yaml
+splits: {train: 800, valid: 100}
+conditioning: {encoding: binned, bins: 64}
+training:
+  seed: 7
+  global_batch: 64
+  max_steps: 100000
+  save_every: 250
+  eval_every: 1000
+  patience: 10
+  relative_improvement: 0.001
+  warmup: 1000
+  tokenizer_lr: 0.0001
+  scratch_lr: 0.0001
+  finetune_lr: 0.00001
+  dropout: 0.1
+  monitor_cases: 16
+scheduler: {gpus: 8, hours: 8}

@@ -1,0 +1,15 @@
+defaults: common.yaml
+dataset: cloverleaf
+directory: cloverleaf_fixed_ic_1000
+shape: [128, 128]
+frames: 61
+dynamic_fields:
+  - {name: density, path: t0_fields/density, semantic: density, group: density, unit: unknown}
+  - {name: pressure, path: t0_fields/pressure, semantic: pressure, group: pressure, unit: unknown}
+  - {name: specific_internal_energy, path: t0_fields/specific_internal_energy, group: energy, unit: unknown}
+  - {name: sound_speed, path: t0_fields/sound_speed, group: sound_speed, unit: unknown}
+  - {name: velocity_x, path: t1_fields/derived_cell_velocity, component: 0, semantic: velocity_x, group: velocity, unit: unknown}
+  - {name: velocity_y, path: t1_fields/derived_cell_velocity, component: 1, semantic: velocity_y, group: velocity, unit: unknown}
+static_fields: []
+parameters:
+  - {name: heat_amplitude, path: scalars/heat_amplitude, unit: unknown}

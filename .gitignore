@@ -26,6 +26,9 @@ configs/local/
 
 # Data and generated artifacts
 data/
+!src/data/
+src/data/*
+!src/data/resumable.py
 runs/
 outputs/
 logs/
