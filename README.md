@@ -24,6 +24,34 @@ The typical workflow is:
 
 ## Repository Contents
 
+### Config-driven, scalar-conditioned direct forecasting
+
+An additional pipeline supports scratch training and adaptation of compatible
+pretrained LATTE models with frozen Phaedra df8 tokenizers. Four example YAMLs
+cover acoustics, CloverLeaf, Gray–Scott, and Kolmogorov. Numerical input-deck
+values stored in HDF5 `scalars/` can use binned embeddings, continuous embeddings,
+or a no-parameter-token control. This is not arbitrary deck-text parsing.
+
+**New dataset? If its files already match the supported 2D, fixed-grid
+Well-style HDF5 layout, you only need to add or edit a dataset YAML config
+and set your local paths—no new model, dataset loader, or training loop.**
+The config identifies the fields, numerical controls, grid/frame sizes,
+split counts, and training options; the same scripts handle the workflow.
+“Well-style” does not mean every dataset in The Well works unchanged:
+different layouts, 3D data, irregular grids, or time-varying controls need
+an adapter first. The exact supported contract is documented below.
+
+See the [pipeline guide](docs/latte_pipeline.md) for installation, synthetic CPU
+tests, checkpoint requirements, and the eight-GPU Slurm profile. The
+[new-dataset guide](docs/latte_pipeline_new_dataset.md) specifies the HDF5 contract
+and config-only onboarding for compatible datasets. Data and pretrained weights
+are not bundled; fine-tuning requires separately supplied compatible checkpoints.
+Direct predictions condition on the initial fields and requested physical time,
+rather than rolling out successive physical timesteps. Existing workflows below
+remain available.
+
+### Existing workflows
+
 - `scripts/train_vqvae.py`: train a VQ-VAE tokenizer on simulation frames.
 - `scripts/export_vq_tokens.py`: export discrete latent tokens from a trained VQ-VAE.
 - `scripts/transformer.py`: train a transformer dynamics model over tokenized trajectories.

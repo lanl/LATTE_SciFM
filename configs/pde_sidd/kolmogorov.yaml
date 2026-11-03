@@ -1,0 +1,14 @@
+defaults: common.yaml
+dataset: kolmogorov
+directory: kolmogorov_fixed_ic_1000
+shape: [128, 128]
+frames: 61
+dynamic_fields:
+  - {name: vorticity, path: t0_fields/vorticity, group: vorticity, unit: unknown}
+  - {name: velocity_x, path: t1_fields/velocity, component: 0, semantic: velocity_x, group: velocity, unit: unknown}
+  - {name: velocity_y, path: t1_fields/velocity, component: 1, semantic: velocity_y, group: velocity, unit: unknown}
+static_fields: []
+parameters:
+  - {name: viscosity, path: scalars/viscosity, unit: unknown}
+  - {name: forcing_amplitude, path: scalars/forcing_amplitude, unit: unknown}
+  - {name: drag_rate, path: scalars/drag_rate, unit: unknown}

@@ -1,0 +1,25 @@
+tokenizer_hyperparameters:
+  vae_hyperparameters:
+    input_channels: 1
+    encoder_channel_mult: [1, 2, 4, 4]
+    decoder_channel_mult: [1, 2, 4, 4]
+    num_res_blocks: 4
+    attn_resolutions: [16, 32]
+    input_h: 128
+    input_w: 128
+    latent_channels: 128
+    dropout: 0.0
+    double_z: false
+  fsq_hyperparameters:
+    fsq_L: [5,4,4,3,3,3,2,2]
+    codebook_embed_dim: 9
+    fsq_scale: 10.0
+  ct_hyperparameters:
+    quantizer: FSQ
+    continuous_scale: 0.1
+    continuous_L: 1024
+    use_entropy_loss: true
+    quantizer_commit_loss_beta: 0.1
+  conv_hyperparameters:
+    quant_conv_ks: 3
+upstream_commit: be3142f717bc10fbac6c4bd11ea065c443d10ab6
