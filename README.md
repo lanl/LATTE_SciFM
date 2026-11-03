@@ -11,15 +11,20 @@ O#: O5130
 
 LATTE is a research codebase for learning latent-token dynamics models for
 time-evolving scientific fields. It converts simulation frames into discrete
-VQ-VAE tokens, trains transformer models to predict token dynamics, and decodes
-predicted tokens back to physical field space for rollout evaluation.
+latent tokens, trains transformer models to predict their evolution, and decodes
+predicted tokens back into physical fields for direct forecasts or temporal
+rollouts. **Phaedra df8 is the default tokenizer for the config-driven pipeline.**
+Phaedra uses finite scalar quantization (FSQ); legacy VQ-VAE workflows remain
+available. FSQ is a quantization method used by Phaedra, rather than a separate
+interchangeable model option in this pipeline.
 
 The typical workflow is:
 
-1. Train a VQ-VAE on simulation frames.
-2. Export VQ tokens for each trajectory.
+1. Train a tokenizer on simulation frames or load a compatible pretrained tokenizer.
+2. Freeze the tokenizer and export discrete latent tokens for each trajectory.
 3. Train a transformer over latent tokens.
-4. Roll out the transformer and decode predicted tokens to pixelspace with VQ-VAE.
+4. Predict tokens at requested times or by temporal rollout, depending on the workflow,
+   and decode them back into physical fields with the corresponding tokenizer.
 
 
 ## Repository Contents
@@ -30,7 +35,10 @@ An additional pipeline supports scratch training and adaptation of compatible
 pretrained LATTE models with frozen Phaedra df8 tokenizers. Four example YAMLs
 cover acoustics, CloverLeaf, Gray–Scott, and Kolmogorov. Numerical input-deck
 values stored in HDF5 `scalars/` can use binned embeddings, continuous embeddings,
-or a no-parameter-token control. This is not arbitrary deck-text parsing.
+or a no-parameter-token control. The pipeline reads numerical parameters already
+extracted into HDF5 (for example, `scalars/F` and `scalars/k`); it does not read
+raw simulation input-deck text. If your parameters exist only in a text deck,
+extract them into the supported HDF5 fields before using this pipeline.
 
 **New dataset? If its files already match the supported 2D, fixed-grid
 Well-style HDF5 layout, you only need to add or edit a dataset YAML config
